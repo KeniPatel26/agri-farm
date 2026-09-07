@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { errorResponse } = require("../utils/responseHandler");
 
 const protect = async (req, res, next) => {
   let token;
@@ -13,30 +14,38 @@ const protect = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1];
 
       // Verify token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || "agriconnect_jwt_secret_key_2026");
 
       // Get user from the token
       req.user = await User.findById(decoded.id).select("-password");
 
-      next();
+      if (!req.user) {
+        return errorResponse(res, "Not authorized, user not found", 401);
+      }
+
+      return next();
     } catch (error) {
-      console.error(error);
-      res.status(401).json({ message: "Not authorized, token failed" });
+      console.error("Auth Middleware JWT verification error:", error.message);
+      return errorResponse(res, "Not authorized, token failed", 401);
     }
   }
 
   if (!token) {
-    res.status(401).json({ message: "Not authorized, no token" });
+    return errorResponse(res, "Not authorized, no token provided", 401);
   }
 };
 
-// Middleware to authorize specific roles
+// Middleware to authorize specific roles (case-insensitive for robust compatibility)
 const authorize = (...roles) => {
+  const normalizedAllowedRoles = roles.map((r) => (r || "").toString().toLowerCase().trim());
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        message: `User role ${req.user.role} is not authorized to access this route` 
-      });
+    const userRole = (req.user && req.user.role ? req.user.role : "").toString().toLowerCase().trim();
+    if (!req.user || !normalizedAllowedRoles.includes(userRole)) {
+      return errorResponse(
+        res,
+        `User role ${req.user ? req.user.role : 'Guest'} is not authorized to access this route`,
+        403
+      );
     }
     next();
   };

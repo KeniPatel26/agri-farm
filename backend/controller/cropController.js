@@ -1,97 +1,180 @@
 const Crop = require('../models/Crop');
+const Farm = require('../models/Farm');
+const { successResponse, errorResponse } = require('../utils/responseHandler');
 
-// @desc    Get crops for logged in farmer
-// @route   GET /api/crops
+// @desc    Get crops for logged in farmer (optionally filtered by farmId)
+// @route   GET /api/v1/crops
 // @access  Private
-const getCrops = async (req, res) => {
+const getCrops = async (req, res, next) => {
   try {
-    const crops = await Crop.find({ farmerId: req.user.id }).sort({ createdAt: -1 });
-    res.status(200).json(crops);
+    const filter = req.user.role === 'Admin' ? {} : { farmerId: req.user._id };
+    if (req.query.farmId) {
+      filter.farmId = req.query.farmId;
+    }
+
+    const crops = await Crop.find(filter)
+      .populate('farmId', 'name area unit location')
+      .sort({ createdAt: -1 });
+
+    return successResponse(res, crops, 'Crops fetched successfully');
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    next(error);
+  }
+};
+
+// @desc    Get single crop
+// @route   GET /api/v1/crops/:id
+// @access  Private
+const getCropById = async (req, res, next) => {
+  try {
+    const crop = await Crop.findById(req.params.id).populate('farmId');
+    if (!crop) {
+      return errorResponse(res, 'Crop not found', 404);
+    }
+    if (crop.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'Admin') {
+      return errorResponse(res, 'Not authorized to view this crop', 403);
+    }
+    return successResponse(res, crop, 'Crop details retrieved');
+  } catch (error) {
+    next(error);
   }
 };
 
 // @desc    Add a new crop
-// @route   POST /api/crops
-// @access  Private
-const addCrop = async (req, res) => {
+// @route   POST /api/v1/crops
+// @access  Private (Farmer)
+const addCrop = async (req, res, next) => {
   try {
-    const { cropName, stage, quantity, location } = req.body;
+    const {
+      cropName,
+      variety,
+      farmId,
+      stage,
+      area,
+      areaUnit,
+      quantity,
+      unit,
+      sowingDate,
+      expectedHarvestDate,
+      irrigationMethod,
+      soilType,
+      location,
+      imageUrl,
+      expenses,
+      harvestEstimate,
+      notes,
+    } = req.body;
 
-    if (!cropName || !quantity || !location) {
-      return res.status(400).json({ message: 'Please provide all required fields' });
+    if (!cropName || !quantity) {
+      return errorResponse(res, 'Please provide crop name and quantity', 400);
+    }
+
+    // If farmId is provided, pull location & soil info from Farm if not explicitly passed
+    let cropLocation = location;
+    let cropSoil = soilType;
+    let cropIrrigation = irrigationMethod;
+
+    if (farmId) {
+      const farm = await Farm.findById(farmId);
+      if (farm) {
+        if (!cropLocation || !cropLocation.coordinates) {
+          cropLocation = farm.location;
+        }
+        if (!cropSoil) cropSoil = farm.soilType;
+        if (!cropIrrigation) cropIrrigation = farm.irrigationType;
+      }
+    }
+
+    // Default fallback coordinates if needed
+    if (!cropLocation || !cropLocation.coordinates) {
+      cropLocation = {
+        type: 'Point',
+        coordinates: [72.5714, 23.0225],
+        address: 'Farm Field',
+      };
     }
 
     const crop = await Crop.create({
-      farmerId: req.user.id,
+      farmerId: req.user._id,
+      farmId: farmId || null,
       cropName,
+      variety: variety || '',
       stage: stage || 'Growing',
-      quantity,
-      location
+      area: area ? Number(area) : 1,
+      areaUnit: areaUnit || 'Acres',
+      quantity: Number(quantity),
+      unit: unit || 'kg',
+      sowingDate: sowingDate || Date.now(),
+      expectedHarvestDate: expectedHarvestDate || null,
+      irrigationMethod: cropIrrigation || 'Drip Irrigation',
+      soilType: cropSoil || 'Alluvial',
+      location: cropLocation,
+      imageUrl: imageUrl || '',
+      expenses: expenses || {},
+      harvestEstimate: harvestEstimate || {},
+      notes: notes || '',
     });
 
-    res.status(201).json(crop);
+    const populated = await Crop.findById(crop._id).populate('farmId', 'name area unit');
+    return successResponse(res, populated, 'Crop added successfully', 201);
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    next(error);
   }
 };
 
-// @desc    Update crop
-// @route   PUT /api/crops/:id
+// @desc    Update crop (status, lifecycle, expenses, notes)
+// @route   PUT /api/v1/crops/:id
 // @access  Private
-const updateCrop = async (req, res) => {
+const updateCrop = async (req, res, next) => {
   try {
     const crop = await Crop.findById(req.params.id);
 
     if (!crop) {
-      return res.status(404).json({ message: 'Crop not found' });
+      return errorResponse(res, 'Crop not found', 404);
     }
 
-    // Make sure the logged in user matches the crop farmer
-    if (crop.farmerId.toString() !== req.user.id) {
-      return res.status(401).json({ message: 'User not authorized' });
+    if (crop.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'Admin') {
+      return errorResponse(res, 'User not authorized', 403);
     }
 
     const updatedCrop = await Crop.findByIdAndUpdate(
       req.params.id,
       req.body,
-      { new: true }
-    );
+      { new: true, runValidators: true }
+    ).populate('farmId', 'name area unit');
 
-    res.status(200).json(updatedCrop);
+    return successResponse(res, updatedCrop, 'Crop updated successfully');
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    next(error);
   }
 };
 
 // @desc    Delete crop
-// @route   DELETE /api/crops/:id
+// @route   DELETE /api/v1/crops/:id
 // @access  Private
-const deleteCrop = async (req, res) => {
+const deleteCrop = async (req, res, next) => {
   try {
     const crop = await Crop.findById(req.params.id);
 
     if (!crop) {
-      return res.status(404).json({ message: 'Crop not found' });
+      return errorResponse(res, 'Crop not found', 404);
     }
 
-    // Make sure the logged in user matches the crop farmer
-    if (crop.farmerId.toString() !== req.user.id) {
-      return res.status(401).json({ message: 'User not authorized' });
+    if (crop.farmerId.toString() !== req.user._id.toString() && req.user.role !== 'Admin') {
+      return errorResponse(res, 'User not authorized', 403);
     }
 
     await crop.deleteOne();
-
-    res.status(200).json({ id: req.params.id });
+    return successResponse(res, { id: req.params.id }, 'Crop deleted successfully');
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
+    next(error);
   }
 };
 
 module.exports = {
   getCrops,
+  getCropById,
   addCrop,
   updateCrop,
-  deleteCrop
+  deleteCrop,
 };
